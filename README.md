@@ -5,7 +5,7 @@
 
 ## What is Ream
 
-Ream is an implementation of the Beam Chain specification, which aims to be modular, contributor-friendly, and blazingly fast.
+Ream is an implementation of the Beam Chain specification, Ream aims to be modular, contributor-friendly, and blazingly fast implementation of the Beam Chain specification.
 
 One of our goals is to build an ecosystem where developers can seamlessly build on Ream, saving time and avoiding the need to reinvent the wheel.
 
