@@ -19,3 +19,4 @@ snap.workspace = true
 ssz_types.workspace = true
 tree_hash.workspace = true
 tree_hash_derive.workspace = true
+ream-common = {path = "../phase0" }

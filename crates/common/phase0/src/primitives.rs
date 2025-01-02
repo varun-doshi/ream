@@ -7,6 +7,7 @@ pub type Epoch = u64; //epoch number
 pub type ForkDigest = B32; //digest of current fork data
 pub type Gwei = u64; //amount in gwei
 pub type NodeID = U256; //Node Idnetifier
+pub type Root = B32;    //Root Identifier
 pub type Slot = u64; //slot number
 pub type SubnetID = U64; //Subnet Identifier
 pub type ValidatorIndex = u64; //validator registry index

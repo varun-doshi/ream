@@ -1,7 +1,7 @@
 use alloy_primitives::B256;
 use serde::{Deserialize, Serialize};
 
-use crate::phase0::primitives::{Epoch, Version};
+use crate::primitives::{Epoch, Version};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
 pub struct Fork {
