@@ -1,14 +1,10 @@
 use alloy_primitives::{aliases::B32, map::HashMap};
 use serde::{Deserialize, Serialize};
 
-use super::latest_message::LatestMessage;
+use super::{helpers::{constants::GENESIS_SLOT, misc::compute_epoch_at_slot}, latest_message::LatestMessage};
 use crate::{
-    beacon_block::BeaconBlock,
-    beacon_state::BeaconState,
-    checkpoint::Checkpoint,
-    helpers::{constants::GENESIS_SLOT, misc::compute_epoch_at_slot},
+    checkpoint::Checkpoint, deneb::{beacon_block::BeaconBlock,beacon_state::BeaconState},
 };
-
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Store {
     pub time: u64,
@@ -29,16 +25,16 @@ pub struct Store {
 impl Store {
     pub fn is_previous_epoch_justified(&self) -> bool {
         let current_epoch = compute_epoch_at_slot(self.get_current_store_slot());
-
         self.justified_checkpoint.epoch + 1 == current_epoch
     }
+    
     pub fn get_current_store_slot(&self) -> u64 {
         compute_epoch_at_slot(self.get_current_slot())
     }
+    
     pub fn get_current_slot(&self) -> u64 {
         GENESIS_SLOT + self.get_slots_since_genesis()
     }
-
     pub fn get_slots_since_genesis(&self) -> u64 {
         self.time - self.genesis_time
     }

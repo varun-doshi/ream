@@ -1,9 +1,7 @@
 pub mod attestation;
 pub mod attestation_data;
-pub mod beacon_block;
 pub mod attester_slashing;
 pub mod beacon_block_header;
-pub mod beacon_state;
 pub mod bls_to_execution_change;
 pub mod checkpoint;
 pub mod deneb;
@@ -13,7 +11,6 @@ pub mod eth_1_data;
 pub mod fork;
 pub mod fork_choice;
 pub mod fork_data;
-pub mod helpers;
 pub mod historical_batch;
 pub mod historical_summary;
 pub mod indexed_attestation;
