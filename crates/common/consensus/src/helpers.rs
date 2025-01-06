@@ -6,18 +6,12 @@ use crate::{
     checkpoint::Checkpoint,
     deneb::beacon_state::BeaconState,
     fork_choice::{
-        helpers::{
-            constants::{EFFECTIVE_BALANCE_INCREMENT, PROPOSER_SCORE_BOOST, SLOTS_PER_EPOCH},
-            misc::compute_epoch_at_slot,
-        },
+        helpers::constants::{EFFECTIVE_BALANCE_INCREMENT, PROPOSER_SCORE_BOOST, SLOTS_PER_EPOCH},
         store::Store,
     },
+    misc::compute_epoch_at_slot,
     validator::Validator,
 };
-
-pub fn compute_start_slot_at_epoch(epoch: u64) -> u64 {
-    epoch * SLOTS_PER_EPOCH
-}
 
 pub fn is_active_validator(validator: &Validator, epoch: u64) -> bool {
     validator.activation_eligibility_epoch <= epoch && epoch < validator.exit_epoch
