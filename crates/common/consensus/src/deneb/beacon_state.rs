@@ -12,8 +12,8 @@ use tree_hash_derive::TreeHash;
 use super::execution_payload_header::ExecutionPayloadHeader;
 use crate::{
     beacon_block_header::BeaconBlockHeader, checkpoint::Checkpoint, eth_1_data::Eth1Data,
-    fork::Fork, fork_choice::helpers::misc::compute_epoch_at_slot,
-    historical_summary::HistoricalSummary, sync_committee::SyncCommittee, validator::Validator,
+    fork::Fork, historical_summary::HistoricalSummary, misc::compute_epoch_at_slot,
+    sync_committee::SyncCommittee, validator::Validator,
 };
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]

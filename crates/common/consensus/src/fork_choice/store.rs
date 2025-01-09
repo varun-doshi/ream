@@ -2,22 +2,17 @@ use alloy_primitives::{map::HashMap, B256};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    helpers::{
-        constants::{
-            GENESIS_EPOCH, GENESIS_SLOT, INTERVALS_PER_SLOT, REORG_HEAD_WEIGHT_THRESHOLD,
-            REORG_MAX_EPOCHS_SINCE_FINALIZATION, REORG_PARENT_WEIGHT_THRESHOLD, SECONDS_PER_SLOT,
-        },
-        misc::compute_epoch_at_slot,
+    helpers::constants::{
+        GENESIS_EPOCH, GENESIS_SLOT, INTERVALS_PER_SLOT, REORG_HEAD_WEIGHT_THRESHOLD,
+        REORG_MAX_EPOCHS_SINCE_FINALIZATION, REORG_PARENT_WEIGHT_THRESHOLD, SECONDS_PER_SLOT,
     },
     latest_message::LatestMessage,
 };
 use crate::{
     checkpoint::Checkpoint,
     deneb::{beacon_block::BeaconBlock, beacon_state::BeaconState},
-    fork_choice::helpers::misc::is_shuffling_stable,
-    helpers::{
-        calculate_committee_fraction, compute_start_slot_at_epoch, get_voting_source, get_weight,
-    },
+    helpers::{calculate_committee_fraction, get_voting_source, get_weight},
+    misc::{compute_epoch_at_slot, compute_start_slot_at_epoch, is_shuffling_stable},
 };
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Store {

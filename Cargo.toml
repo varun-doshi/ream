@@ -25,6 +25,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 alloy-primitives = { version = "0.8.15", features = ['serde'] }
+anyhow = "1.0.95"
 c-kzg = "2.0.0"
 clap = "4"
 ethereum_serde_utils = "0.7.0"
