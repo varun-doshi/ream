@@ -24,6 +24,7 @@ use ream_consensus::{
     historical_summary::HistoricalSummary,
     indexed_attestation::IndexedAttestation,
     proposer_slashing::ProposerSlashing,
+    signing_data::SigningData,
     sync_aggregate::SyncAggregate,
     sync_committee::SyncCommittee,
     validator::Validator,
@@ -54,6 +55,7 @@ test_consensus_type!(ProposerSlashing);
 test_consensus_type!(SignedBeaconBlock);
 test_consensus_type!(SignedBLSToExecutionChange);
 test_consensus_type!(SignedVoluntaryExit);
+test_consensus_type!(SigningData);
 test_consensus_type!(SyncAggregate);
 test_consensus_type!(SyncCommittee);
 test_consensus_type!(Validator);
