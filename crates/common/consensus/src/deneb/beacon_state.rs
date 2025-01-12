@@ -1,7 +1,7 @@
 use std::{cmp::max, sync::Arc};
 
 use alloy_primitives::{aliases::B32, B256};
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 use ethereum_hashing::{hash, hash_fixed};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -21,16 +21,19 @@ use crate::{
     fork::Fork,
     fork_choice::helpers::constants::{
         CHURN_LIMIT_QUOTIENT, DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER,
-        EFFECTIVE_BALANCE_INCREMENT, EPOCHS_PER_HISTORICAL_VECTOR, GENESIS_EPOCH,
-        MAX_COMMITTEES_PER_SLOT, MAX_EFFECTIVE_BALANCE, MAX_RANDOM_BYTE, MIN_PER_EPOCH_CHURN_LIMIT,
-        MIN_SEED_LOOKAHEAD, SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, TARGET_COMMITTEE_SIZE,
+        EFFECTIVE_BALANCE_INCREMENT, EPOCHS_PER_HISTORICAL_VECTOR, EPOCHS_PER_SLASHINGS_VECTOR,
+        FAR_FUTURE_EPOCH, GENESIS_EPOCH, MAX_COMMITTEES_PER_SLOT, MAX_EFFECTIVE_BALANCE,
+        MAX_RANDOM_BYTE, MIN_PER_EPOCH_CHURN_LIMIT, MIN_SEED_LOOKAHEAD,
+        MIN_SLASHING_PENALTY_QUOTIENT, MIN_VALIDATOR_WITHDRAWABILITY_DELAY, PROPOSER_WEIGHT,
+        SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, TARGET_COMMITTEE_SIZE, WEIGHT_DENOMINATOR,
+        WHISTLEBLOWER_REWARD_QUOTIENT,
     },
     helpers::is_active_validator,
     historical_summary::HistoricalSummary,
     indexed_attestation::IndexedAttestation,
     misc::{
-        compute_committee, compute_domain, compute_epoch_at_slot, compute_shuffled_index,
-        compute_start_slot_at_epoch,
+        compute_activation_exit_epoch, compute_committee, compute_domain, compute_epoch_at_slot,
+        compute_shuffled_index, compute_start_slot_at_epoch,
     },
     sync_committee::SyncCommittee,
     validator::Validator,
@@ -199,7 +202,7 @@ impl BeaconState {
     }
 
     /// Return the beacon proposer index at the current slot.
-    pub fn get_beacon_proposer_index(&self) -> Result<u64, anyhow::Error> {
+    pub fn get_beacon_proposer_index(&self) -> anyhow::Result<u64> {
         let epoch = self.get_current_epoch();
         let seed = B256::from(hash_fixed(
             &[
@@ -299,5 +302,104 @@ impl BeaconState {
             data: attestation.data,
             signature: attestation.signature,
         })
+    }
+
+    /// Increase the validator balance at index ``index`` by ``delta``.
+    pub fn increase_balance(&mut self, index: u64, delta: u64) {
+        if let Some(balance) = self.balances.get_mut(index as usize) {
+            *balance += delta;
+        }
+    }
+
+    /// Decrease the validator balance at index ``index`` by ``delta`` with underflow protection.
+    pub fn decrease_balance(&mut self, index: u64, delta: u64) {
+        if let Some(balance) = self.balances.get_mut(index as usize) {
+            let _ = balance.saturating_sub(delta);
+        }
+    }
+
+    /// Initiate if validator already initiated exit.
+    pub fn initiate_validator_exit(&mut self, index: u64) {
+        if index as usize >= self.validators.len() {
+            return;
+        }
+        if self.validators.get(index as usize).unwrap().exit_epoch != FAR_FUTURE_EPOCH {
+            return;
+        }
+
+        let mut exit_epochs: Vec<u64> = self
+            .validators
+            .iter()
+            .filter_map(|v| {
+                if v.exit_epoch != FAR_FUTURE_EPOCH {
+                    Some(v.exit_epoch)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        exit_epochs.push(compute_activation_exit_epoch(self.get_current_epoch()));
+        let mut exit_queue_epoch = *exit_epochs.iter().max().unwrap_or(&0);
+
+        let exit_queue_churn = self
+            .validators
+            .iter()
+            .filter(|v| v.exit_epoch == exit_queue_epoch)
+            .count();
+
+        if exit_queue_churn >= self.get_validator_churn_limit() as usize {
+            exit_queue_epoch += 1;
+        }
+
+        // Set validator exit epoch and withdrawable epoch
+        if let Some(validator) = self.validators.get_mut(index as usize) {
+            validator.exit_epoch = exit_queue_epoch;
+            validator.withdrawable_epoch =
+                validator.exit_epoch + MIN_VALIDATOR_WITHDRAWABILITY_DELAY;
+        }
+    }
+
+    /// Slash the validator with index ``slashed_index``
+    pub fn slash_validator(
+        &mut self,
+        slashed_index: u64,
+        whistleblower_index: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let epoch = self.get_current_epoch();
+
+        // Initiate validator exit
+        self.initiate_validator_exit(slashed_index);
+
+        let validator_effective_balance =
+            if let Some(validator) = self.validators.get_mut(slashed_index as usize) {
+                validator.slashed = true;
+                validator.withdrawable_epoch = std::cmp::max(
+                    validator.withdrawable_epoch,
+                    epoch + EPOCHS_PER_SLASHINGS_VECTOR,
+                );
+                validator.effective_balance
+            } else {
+                bail!("Validator at index {slashed_index} not found")
+            };
+        // Add slashed effective balance to the slashings vector
+        self.slashings[(epoch % EPOCHS_PER_SLASHINGS_VECTOR) as usize] +=
+            validator_effective_balance;
+        // Decrease validator balance
+        self.decrease_balance(
+            slashed_index,
+            validator_effective_balance / MIN_SLASHING_PENALTY_QUOTIENT,
+        );
+
+        // Apply proposer and whistleblower rewards
+        let proposer_index = self.get_beacon_proposer_index()?;
+        let whistleblower_index = whistleblower_index.unwrap_or(proposer_index);
+
+        let whistleblower_reward = validator_effective_balance / WHISTLEBLOWER_REWARD_QUOTIENT;
+        let proposer_reward = whistleblower_reward * PROPOSER_WEIGHT / WEIGHT_DENOMINATOR;
+        self.increase_balance(proposer_index, proposer_reward);
+        self.increase_balance(whistleblower_index, whistleblower_reward - proposer_reward);
+
+        Ok(())
     }
 }
