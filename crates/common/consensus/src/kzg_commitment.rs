@@ -5,8 +5,8 @@ use std::{
 };
 
 use alloy_primitives::hex;
-use c_kzg::BYTES_PER_COMMITMENT;
 use ethereum_hashing::hash_fixed;
+use kzg::eip_4844::BYTES_PER_COMMITMENT;
 use serde::{
     de::{Deserialize, Deserializer},
     ser::{Serialize, Serializer},
@@ -28,13 +28,13 @@ impl KzgCommitment {
     }
 
     pub fn empty_for_testing() -> Self {
-        KzgCommitment([0; c_kzg::BYTES_PER_COMMITMENT])
+        KzgCommitment([0; BYTES_PER_COMMITMENT])
     }
 }
 
-impl From<KzgCommitment> for c_kzg::Bytes48 {
+impl From<KzgCommitment> for kzg::eth::c_bindings::Bytes48 {
     fn from(value: KzgCommitment) -> Self {
-        value.0.into()
+        kzg::eth::c_bindings::Bytes48 { bytes: value.0 }
     }
 }
 
