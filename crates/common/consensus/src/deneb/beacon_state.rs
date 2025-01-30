@@ -32,11 +32,12 @@ use crate::{
         MAX_RANDOM_BYTE, MIN_ATTESTATION_INCLUSION_DELAY, MIN_EPOCHS_TO_INACTIVITY_PENALTY,
         MIN_GENESIS_ACTIVE_VALIDATOR_COUNT, MIN_GENESIS_TIME, MIN_PER_EPOCH_CHURN_LIMIT,
         MIN_SEED_LOOKAHEAD, MIN_SLASHING_PENALTY_QUOTIENT, MIN_VALIDATOR_WITHDRAWABILITY_DELAY,
-        PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT,
-        TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX,
-        TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT,
+        PARTICIPATION_FLAG_WEIGHTS, PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SLOTS_PER_EPOCH,
+        SLOTS_PER_HISTORICAL_ROOT, TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX,
+        TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,
+        WHISTLEBLOWER_REWARD_QUOTIENT,
     },
-    helpers::is_active_validator,
+    helpers::{is_active_validator, is_valid_indexed_attestation},
     historical_summary::HistoricalSummary,
     indexed_attestation::IndexedAttestation,
     misc::{
@@ -580,5 +581,76 @@ impl BeaconState {
             }
         }
         Ok((rewards, penalties))
+    }
+
+    pub fn process_attestation(&mut self, attestation: Attestation) -> anyhow::Result<()> {
+        ensure!(
+            attestation.data.target.epoch == self.get_previous_epoch()
+                || attestation.data.target.epoch == self.get_current_epoch(),
+            "Target epoch must be the previous or current epoch"
+        );
+
+        ensure!(
+            attestation.data.target.epoch == compute_epoch_at_slot(attestation.data.slot),
+            "Target epoch must match the computed epoch at slot"
+        );
+
+        ensure!(
+            attestation.data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= self.slot,
+            "Attestation must be included after the minimum delay"
+        );
+
+        ensure!(
+            attestation.data.index
+                < self.get_committee_count_per_slot(attestation.data.target.epoch),
+            "Committee index must be within bounds"
+        );
+
+        let committee = self.get_beacon_committee(attestation.data.slot, attestation.data.index)?;
+        assert_eq!(
+            attestation.aggregation_bits.len(),
+            committee.len(),
+            "Aggregation bits length must match committee size"
+        );
+
+        let participation_flag_indices = self.get_attestation_participation_flag_indices(
+            attestation.data.clone(),
+            self.slot - attestation.data.slot,
+        )?;
+
+        ensure!(
+            is_valid_indexed_attestation(self, &self.get_indexed_attestation(attestation.clone())?),
+            "Attestation signature must be valid"
+        );
+
+        // Update epoch participation flags
+        let mut epoch_participation = if attestation.data.target.epoch == self.get_current_epoch() {
+            self.current_epoch_participation.clone()
+        } else {
+            self.previous_epoch_participation.clone()
+        };
+
+        let mut proposer_reward_numerator = 0;
+
+        for index in self.get_attesting_indices(attestation)? {
+            for (flag_index, &weight) in PARTICIPATION_FLAG_WEIGHTS.iter().enumerate() {
+                if participation_flag_indices.contains(&(flag_index as u8))
+                    && !Self::has_flag(
+                        *epoch_participation.get(index as usize).unwrap(),
+                        flag_index as u8,
+                    )
+                {
+                    epoch_participation[index as usize] =
+                        Self::add_flag(epoch_participation[index as usize], flag_index as u8);
+                    proposer_reward_numerator += self.get_base_reward(index) * weight;
+                }
+            }
+        }
+
+        let proposer_reward_denominator =
+            (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR / PROPOSER_WEIGHT;
+        let proposer_reward = proposer_reward_numerator / proposer_reward_denominator;
+        self.increase_balance(self.get_beacon_proposer_index()?, proposer_reward);
+        Ok(())
     }
 }
