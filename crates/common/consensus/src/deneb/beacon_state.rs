@@ -48,10 +48,11 @@ use crate::{
         MIN_ATTESTATION_INCLUSION_DELAY, MIN_EPOCHS_TO_INACTIVITY_PENALTY,
         MIN_GENESIS_ACTIVE_VALIDATOR_COUNT, MIN_GENESIS_TIME, MIN_PER_EPOCH_CHURN_LIMIT,
         MIN_SEED_LOOKAHEAD, MIN_SLASHING_PENALTY_QUOTIENT, MIN_VALIDATOR_WITHDRAWABILITY_DELAY,
-        PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SECONDS_PER_SLOT, SHARD_COMMITTEE_PERIOD,
-        SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, SYNC_COMMITTEE_SIZE, SYNC_REWARD_WEIGHT,
-        TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX,
-        TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT,
+        PARTICIPATION_FLAG_WEIGHTS, PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SECONDS_PER_SLOT,
+        SHARD_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, SYNC_COMMITTEE_SIZE,
+        SYNC_REWARD_WEIGHT, TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX,
+        TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,
+        WHISTLEBLOWER_REWARD_QUOTIENT,
     },
     helpers::{is_active_validator, xor},
     historical_summary::HistoricalSummary,
@@ -337,10 +338,13 @@ impl BeaconState {
             .map_err(|err| anyhow!("Signarure conversion failed:{:?}", err))?;
         let signing_root = compute_signing_root(&indexed_attestation.data, domain);
 
-        let publickeys: Vec<blst::min_pk::PublicKey> = pubkeys
+        let publickeys = pubkeys
             .iter()
-            .filter_map(|key| blst::min_pk::PublicKey::from_bytes(&key.inner).ok())
-            .collect();
+            .map(|key| {
+                blst::min_pk::PublicKey::from_bytes(&key.inner)
+                    .map_err(|e| anyhow!(format!("Public key conversion failed:{:?}", e)))
+            })
+            .collect::<Result<Vec<blst::min_pk::PublicKey>, _>>()?;
 
         let verification_result = sig.fast_aggregate_verify(
             true,
@@ -356,7 +360,7 @@ impl BeaconState {
     }
 
     /// Return the set of attesting indices corresponding to ``data`` and ``bits``.
-    pub fn get_attesting_indices(&self, attestation: Attestation) -> anyhow::Result<Vec<u64>> {
+    pub fn get_attesting_indices(&self, attestation: &Attestation) -> anyhow::Result<Vec<u64>> {
         let committee = self.get_beacon_committee(attestation.data.slot, attestation.data.index)?;
         let indices: Vec<u64> = committee
             .into_iter()
@@ -377,14 +381,14 @@ impl BeaconState {
     /// Return the indexed attestation corresponding to ``attestation``.
     pub fn get_indexed_attestation(
         &self,
-        attestation: Attestation,
+        attestation: &Attestation,
     ) -> anyhow::Result<IndexedAttestation> {
-        let mut attesting_indices = self.get_attesting_indices(attestation.clone())?;
+        let mut attesting_indices = self.get_attesting_indices(attestation)?;
         attesting_indices.sort();
         Ok(IndexedAttestation {
             attesting_indices: attesting_indices.into(),
-            data: attestation.data,
-            signature: attestation.signature,
+            data: attestation.data.clone(),
+            signature: attestation.signature.clone(),
         })
     }
 
@@ -618,7 +622,7 @@ impl BeaconState {
     /// Return the flag indices that are satisfied by an attestation.
     pub fn get_attestation_participation_flag_indices(
         &self,
-        data: AttestationData,
+        data: &AttestationData,
         inclusion_delay: u64,
     ) -> anyhow::Result<Vec<u8>> {
         let justified_checkpoint = if data.target.epoch == self.get_current_epoch() {
@@ -1338,6 +1342,85 @@ impl BeaconState {
             self.randao_mixes[(epoch % EPOCHS_PER_HISTORICAL_VECTOR) as usize] = mix;
         }
 
+        Ok(())
+    }
+
+    pub fn process_attestation(&mut self, attestation: &Attestation) -> anyhow::Result<()> {
+        ensure!(
+            attestation.data.target.epoch == self.get_previous_epoch()
+                || attestation.data.target.epoch == self.get_current_epoch(),
+            "Target epoch must be the previous or current epoch"
+        );
+
+        ensure!(
+            attestation.data.target.epoch == compute_epoch_at_slot(attestation.data.slot),
+            "Target epoch must match the computed epoch at slot"
+        );
+
+        ensure!(
+            attestation.data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= self.slot,
+            "Attestation must be included after the minimum delay"
+        );
+
+        ensure!(
+            attestation.data.index
+                < self.get_committee_count_per_slot(attestation.data.target.epoch),
+            "Committee index must be within bounds"
+        );
+
+        let committee = self.get_beacon_committee(attestation.data.slot, attestation.data.index)?;
+        ensure!(
+            attestation.aggregation_bits.len() == committee.len(),
+            "Aggregation bits length must match committee size"
+        );
+
+        let participation_flag_indices = self.get_attestation_participation_flag_indices(
+            &attestation.data,
+            self.slot - attestation.data.slot,
+        )?;
+
+        ensure!(
+            self.is_valid_indexed_attestation(&self.get_indexed_attestation(attestation)?)?,
+            "Attestation signature must be valid"
+        );
+
+        let attesting_indices = self.get_attesting_indices(attestation)?;
+        let base_rewards: Vec<_> = attesting_indices
+            .iter()
+            .map(|&index| (index, self.get_base_reward(index)))
+            .collect();
+
+        // Update epoch participation flags
+        let epoch_participation = if attestation.data.target.epoch == self.get_current_epoch() {
+            &mut self.current_epoch_participation
+        } else {
+            &mut self.previous_epoch_participation
+        };
+
+        let mut proposer_reward_numerator = 0;
+
+        for (index, base_reward) in base_rewards {
+            for (flag_index, &weight) in PARTICIPATION_FLAG_WEIGHTS.iter().enumerate() {
+                let flag_index = flag_index as u8;
+
+                if participation_flag_indices.contains(&flag_index) {
+                    let epoch_part =
+                        epoch_participation.get_mut(index as usize).ok_or_else(|| {
+                            anyhow!("Index {} out of bounds in epoch_participation", index)
+                        })?;
+
+                    if !Self::has_flag(*epoch_part, flag_index) {
+                        *epoch_part = Self::add_flag(*epoch_part, flag_index);
+                        proposer_reward_numerator += base_reward * weight;
+                    }
+                }
+            }
+        }
+
+        let proposer_reward_denominator =
+            (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR / PROPOSER_WEIGHT;
+        let proposer_reward = proposer_reward_numerator / proposer_reward_denominator;
+        self.increase_balance(self.get_beacon_proposer_index()?, proposer_reward);
         Ok(())
     }
 }
