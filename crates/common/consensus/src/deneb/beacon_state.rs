@@ -6,6 +6,7 @@ use std::{
 
 use alloy_primitives::{aliases::B32, B256};
 use anyhow::{bail, ensure};
+use blst::min_pk::PublicKey;
 use ethereum_hashing::{hash, hash_fixed};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -42,8 +43,9 @@ use crate::{
     indexed_attestation::IndexedAttestation,
     misc::{
         compute_activation_exit_epoch, compute_committee, compute_domain, compute_epoch_at_slot,
-        compute_shuffled_index, compute_start_slot_at_epoch,
+        compute_shuffled_index, compute_signing_root, compute_start_slot_at_epoch,
     },
+    proposer_slashing::ProposerSlashing,
     sync_committee::SyncCommittee,
     validator::Validator,
 };
@@ -619,5 +621,71 @@ impl BeaconState {
         ensure!(!proposer.slashed, "Block proposer must not be slashed");
 
         Ok(())
+    }
+
+    pub fn process_proposer_slashing(
+        &mut self,
+        proposer_slashing: &ProposerSlashing,
+    ) -> anyhow::Result<()> {
+        let header_1 = &proposer_slashing.signed_header_1.message;
+        let header_2 = &proposer_slashing.signed_header_2.message;
+
+        // Verify header slots match
+        ensure!(header_1.slot == header_2.slot, "Header slots must match");
+
+        // Verify header proposer indices match
+        ensure!(
+            header_1.proposer_index == header_2.proposer_index,
+            "Proposer indices must match"
+        );
+
+        // Verify the headers are different
+        ensure!(header_1 != header_2, "Headers must be different");
+
+        // Get the proposer and verify they are slashable
+        let proposer_index = header_1.proposer_index;
+        let proposer = self
+            .validators
+            .get(proposer_index as usize)
+            .ok_or_else(|| anyhow::anyhow!("Invalid proposer index"))?;
+
+        ensure!(
+            proposer.is_slashable_validator(self.get_current_epoch()),
+            "Proposer is not slashable"
+        );
+
+        // Verify signatures
+        for signed_header in [
+            &proposer_slashing.signed_header_1,
+            &proposer_slashing.signed_header_2,
+        ] {
+            let domain = self.get_domain(
+                DOMAIN_BEACON_PROPOSER,
+                Some(compute_epoch_at_slot(signed_header.message.slot)),
+            )?;
+
+            let signing_root = compute_signing_root(&signed_header.message, domain);
+
+            let sig =
+                blst::min_pk::Signature::from_bytes(&signed_header.signature.signature).unwrap();
+
+            let public_key =
+                PublicKey::from_bytes(&proposer.pubkey.inner).expect("Cold not convert PublicKey");
+
+            let verification_result = sig.fast_aggregate_verify(
+                true,
+                signing_root.as_ref(),
+                domain.as_ref(),
+                &[&public_key],
+            );
+
+            ensure!(
+                verification_result == blst::BLST_ERROR::BLST_SUCCESS,
+                "BLS Signature verification failed!"
+            );
+        }
+
+        // Slash the validator
+        self.slash_validator(proposer_index, None)
     }
 }
