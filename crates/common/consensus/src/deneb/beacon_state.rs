@@ -26,6 +26,7 @@ use super::{
 use crate::{
     attestation::Attestation,
     attestation_data::AttestationData,
+    attester_slashing::AttesterSlashing,
     beacon_block_header::BeaconBlockHeader,
     bls_to_execution_change::SignedBLSToExecutionChange,
     checkpoint::Checkpoint,
@@ -56,7 +57,9 @@ use crate::{
     misc::{
         compute_activation_exit_epoch, compute_committee, compute_domain, compute_epoch_at_slot,
         compute_shuffled_index, compute_signing_root, compute_start_slot_at_epoch,
+        is_sorted_and_unique,
     },
+    predicates::is_slashable_attestation_data,
     proposer_slashing::ProposerSlashing,
     pubkey::PubKey,
     signature::BlsSignature,
@@ -284,6 +287,7 @@ impl BeaconState {
             Some(fork_version),
             Some(self.genesis_validators_root),
         )
+        .map_err(|err| anyhow!("Domain computation failed: {:?}", err))
     }
 
     /// Return the beacon committee at ``slot`` for ``index``.
@@ -296,6 +300,56 @@ impl BeaconState {
             (slot % SLOTS_PER_EPOCH) * committees_per_slot + index,
             committees_per_slot * SLOTS_PER_EPOCH,
         )
+    }
+
+    /// Check if ``indexed_attestation`` is not empty, has sorted and unique indices and has a valid
+    /// aggregate signature.
+    pub fn is_valid_indexed_attestation(
+        &self,
+        indexed_attestation: &IndexedAttestation,
+    ) -> anyhow::Result<bool> {
+        let indices: Vec<usize> = indexed_attestation
+            .attesting_indices
+            .iter()
+            .map(|&i| i as usize)
+            .collect();
+        // Verify indices are sorted and unique
+        if indices.is_empty() || !is_sorted_and_unique(&indices) {
+            return Ok(false);
+        }
+
+        // Collect public keys of attesting validators
+        let pubkeys: Vec<_> = indices
+            .iter()
+            .filter_map(|&i| self.validators.get(i).map(|v| v.pubkey.clone()))
+            .collect();
+
+        // Compute domain and signing root
+        let domain = self.get_domain(
+            DOMAIN_BEACON_ATTESTER,
+            Some(indexed_attestation.data.target.epoch),
+        )?;
+
+        let sig = blst::min_pk::Signature::from_bytes(&indexed_attestation.signature.signature)
+            .map_err(|err| anyhow!("Signarure conversion failed:{:?}", err))?;
+        let signing_root = compute_signing_root(&indexed_attestation.data, domain);
+
+        let publickeys: Vec<blst::min_pk::PublicKey> = pubkeys
+            .iter()
+            .filter_map(|key| blst::min_pk::PublicKey::from_bytes(&key.inner).ok())
+            .collect();
+
+        let verification_result = sig.fast_aggregate_verify(
+            true,
+            signing_root.as_ref(),
+            DST,
+            publickeys.iter().collect::<Vec<_>>().as_slice(),
+        );
+
+        Ok(matches!(
+            verification_result,
+            blst::BLST_ERROR::BLST_SUCCESS
+        ))
     }
 
     /// Return the set of attesting indices corresponding to ``data`` and ``bits``.
@@ -1014,6 +1068,48 @@ impl BeaconState {
                 .push(historical_summary)
                 .map_err(|err| anyhow!("Failed to push historical summory {err:?}"))?;
         }
+        Ok(())
+    }
+
+    pub fn process_attester_slashing(
+        &mut self,
+        attester_slashing: AttesterSlashing,
+    ) -> anyhow::Result<()> {
+        let attestation_1 = &attester_slashing.attestation_1;
+        let attestation_2 = &attester_slashing.attestation_2;
+
+        // Ensure the two attestations are slashable
+        ensure!(
+            is_slashable_attestation_data(&attestation_1.data, &attestation_2.data),
+            "Attestations are not slashable"
+        );
+
+        // Validate both attestations
+        ensure!(
+            self.is_valid_indexed_attestation(attestation_1)?,
+            "First attestation is invalid"
+        );
+        ensure!(
+            self.is_valid_indexed_attestation(attestation_2)?,
+            "Second attestation is invalid"
+        );
+
+        let current_epoch = self.get_current_epoch();
+        let indices_1: HashSet<_> = attestation_1.attesting_indices.iter().cloned().collect();
+        let indices_2: HashSet<_> = attestation_2.attesting_indices.iter().cloned().collect();
+
+        let mut slashed_any = false;
+
+        // Find common attesting indices and process slashing
+        for &index in indices_1.intersection(&indices_2).sorted() {
+            if self.validators[index as usize].is_slashable_validator(current_epoch) {
+                self.slash_validator(index, None)?;
+                slashed_any = true;
+            }
+        }
+
+        ensure!(slashed_any, "No validator was slashed");
+
         Ok(())
     }
 }

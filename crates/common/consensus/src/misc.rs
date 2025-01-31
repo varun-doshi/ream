@@ -103,3 +103,7 @@ pub fn compute_domain(
     let domain_bytes = [&domain_type.0, &fork_data_root.0[..28]].concat();
     Ok(B256::from_slice(&domain_bytes))
 }
+
+pub fn is_sorted_and_unique(indices: &[usize]) -> bool {
+    indices.windows(2).all(|w| w[0] < w[1])
+}
