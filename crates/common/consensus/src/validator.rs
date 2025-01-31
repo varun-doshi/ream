@@ -24,3 +24,9 @@ pub struct Validator {
     /// When validator can withdraw funds
     pub withdrawable_epoch: u64,
 }
+impl Validator {
+    // Check if ``validator`` is slashable.
+    pub fn is_slashable_validator(&self, epoch: u64) -> bool {
+        !self.slashed && self.activation_epoch <= epoch && epoch < self.withdrawable_epoch
+    }
+}

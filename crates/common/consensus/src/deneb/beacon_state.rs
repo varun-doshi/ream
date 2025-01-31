@@ -21,6 +21,7 @@ use super::{beacon_block::BeaconBlock, execution_payload_header::ExecutionPayloa
 use crate::{
     attestation::Attestation,
     attestation_data::AttestationData,
+    attester_slashing::AttesterSlashing,
     beacon_block_header::BeaconBlockHeader,
     checkpoint::Checkpoint,
     eth_1_data::Eth1Data,
@@ -44,6 +45,7 @@ use crate::{
         compute_activation_exit_epoch, compute_committee, compute_domain, compute_epoch_at_slot,
         compute_shuffled_index, compute_start_slot_at_epoch,
     },
+    predicates::{is_slashable_attestation_data, is_valid_indexed_attestation},
     sync_committee::SyncCommittee,
     validator::Validator,
 };
@@ -617,6 +619,48 @@ impl BeaconState {
         // Verify proposer is not slashed
         let proposer = &self.validators[block.proposer_index as usize];
         ensure!(!proposer.slashed, "Block proposer must not be slashed");
+
+        Ok(())
+    }
+
+    pub fn process_attester_slashing(
+        &mut self,
+        attester_slashing: AttesterSlashing,
+    ) -> anyhow::Result<()> {
+        let attestation_1 = &attester_slashing.attestation_1;
+        let attestation_2 = &attester_slashing.attestation_2;
+
+        // Ensure the two attestations are slashable
+        ensure!(
+            is_slashable_attestation_data(&attestation_1.data, &attestation_2.data),
+            "Attestations are not slashable"
+        );
+
+        // Validate both attestations
+        ensure!(
+            is_valid_indexed_attestation(self, attestation_1),
+            "First attestation is invalid"
+        );
+        ensure!(
+            is_valid_indexed_attestation(self, attestation_2),
+            "Second attestation is invalid"
+        );
+
+        let current_epoch = self.get_current_epoch();
+        let indices_1: HashSet<_> = attestation_1.attesting_indices.iter().cloned().collect();
+        let indices_2: HashSet<_> = attestation_2.attesting_indices.iter().cloned().collect();
+
+        let mut slashed_any = false;
+
+        // Find common attesting indices and process slashing
+        for &index in indices_1.intersection(&indices_2).sorted() {
+            if self.validators[index as usize].is_slashable_validator(current_epoch) {
+                self.slash_validator(index, None)?;
+                slashed_any = true;
+            }
+        }
+
+        ensure!(slashed_any, "No validator was slashed");
 
         Ok(())
     }
