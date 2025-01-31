@@ -46,3 +46,8 @@ impl Validator {
             && balance > MAX_EFFECTIVE_BALANCE
     }
 }
+impl Validator {
+    pub fn is_slashable_validator(&self, epoch: u64) -> bool {
+        !self.slashed && self.activation_epoch <= epoch && epoch < self.withdrawable_epoch
+    }
+}
