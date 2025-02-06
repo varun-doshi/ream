@@ -40,16 +40,17 @@ use crate::{
         DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_DEPOSIT, DOMAIN_SYNC_COMMITTEE,
         DOMAIN_VOLUNTARY_EXIT, EFFECTIVE_BALANCE_INCREMENT, EPOCHS_PER_HISTORICAL_VECTOR,
         EPOCHS_PER_SLASHINGS_VECTOR, ETH1_ADDRESS_WITHDRAWAL_PREFIX, FAR_FUTURE_EPOCH,
-        GENESIS_EPOCH, GENESIS_SLOT, INACTIVITY_PENALTY_QUOTIENT_ALTAIR, INACTIVITY_SCORE_BIAS,
-        INACTIVITY_SCORE_RECOVERY_RATE, MAX_COMMITTEES_PER_SLOT, MAX_EFFECTIVE_BALANCE,
-        MAX_RANDOM_BYTE, MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP, MAX_WITHDRAWALS_PER_PAYLOAD,
-        MIN_ATTESTATION_INCLUSION_DELAY, MIN_EPOCHS_TO_INACTIVITY_PENALTY,
-        MIN_GENESIS_ACTIVE_VALIDATOR_COUNT, MIN_GENESIS_TIME, MIN_PER_EPOCH_CHURN_LIMIT,
-        MIN_SEED_LOOKAHEAD, MIN_SLASHING_PENALTY_QUOTIENT, MIN_VALIDATOR_WITHDRAWABILITY_DELAY,
-        PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SECONDS_PER_SLOT, SHARD_COMMITTEE_PERIOD,
-        SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, SYNC_COMMITTEE_SIZE, TARGET_COMMITTEE_SIZE,
-        TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX,
-        WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT,
+        G2_POINT_AT_INFINITY, GENESIS_EPOCH, GENESIS_SLOT, INACTIVITY_PENALTY_QUOTIENT_ALTAIR,
+        INACTIVITY_SCORE_BIAS, INACTIVITY_SCORE_RECOVERY_RATE, MAX_COMMITTEES_PER_SLOT,
+        MAX_EFFECTIVE_BALANCE, MAX_RANDOM_BYTE, MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP,
+        MAX_WITHDRAWALS_PER_PAYLOAD, MIN_ATTESTATION_INCLUSION_DELAY,
+        MIN_EPOCHS_TO_INACTIVITY_PENALTY, MIN_GENESIS_ACTIVE_VALIDATOR_COUNT, MIN_GENESIS_TIME,
+        MIN_PER_EPOCH_CHURN_LIMIT, MIN_SEED_LOOKAHEAD, MIN_SLASHING_PENALTY_QUOTIENT,
+        MIN_VALIDATOR_WITHDRAWABILITY_DELAY, PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT,
+        SECONDS_PER_SLOT, SHARD_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT,
+        SYNC_COMMITTEE_SIZE, SYNC_REWARD_WEIGHT, TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX,
+        TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,
+        WHISTLEBLOWER_REWARD_QUOTIENT,
     },
     helpers::is_active_validator,
     historical_summary::HistoricalSummary,
@@ -63,6 +64,7 @@ use crate::{
     proposer_slashing::ProposerSlashing,
     pubkey::PubKey,
     signature::BlsSignature,
+    sync_aggregate::SyncAggregate,
     sync_committee::SyncCommittee,
     validator::Validator,
     voluntary_exit::SignedVoluntaryExit,
@@ -1109,6 +1111,74 @@ impl BeaconState {
         }
 
         ensure!(slashed_any, "No validator was slashed");
+        Ok(())
+    }
+
+    pub fn process_sync_aggregate(&mut self, sync_aggregate: SyncAggregate) -> anyhow::Result<()> {
+        // Verify sync committee aggregate signature signing over the previous slot block root
+        let committee_pubkeys = &self.current_sync_committee.pubkeys;
+        let mut participant_pubkeys = vec![];
+
+        for (pubkey, bit) in committee_pubkeys
+            .iter()
+            .zip(sync_aggregate.sync_committee_bits.iter())
+        {
+            if bit {
+                participant_pubkeys.push(pubkey.clone());
+            }
+        }
+
+        let previous_slot = max(self.slot, 1) - 1;
+        let domain = self.get_domain(
+            DOMAIN_SYNC_COMMITTEE,
+            Some(compute_epoch_at_slot(previous_slot)),
+        )?;
+        let signing_root =
+            compute_signing_root(self.get_block_root_at_slot(previous_slot)?, domain);
+
+        let is_valid = eth_fast_aggregate_verify(
+            &participant_pubkeys,
+            signing_root,
+            sync_aggregate.sync_committee_signature,
+        )?;
+
+        ensure!(is_valid, "Sync aggregate signature verification failed.");
+
+        // Compute participant and proposer rewards
+        let total_active_increments = self.get_total_active_balance() / EFFECTIVE_BALANCE_INCREMENT;
+        let total_base_rewards = self.get_base_reward_per_increment() * total_active_increments;
+        let max_participant_rewards =
+            total_base_rewards * SYNC_REWARD_WEIGHT / WEIGHT_DENOMINATOR / SLOTS_PER_EPOCH;
+        let participant_reward = max_participant_rewards / SYNC_COMMITTEE_SIZE;
+        let proposer_reward =
+            participant_reward * PROPOSER_WEIGHT / (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT);
+
+        // Apply participant and proposer rewards
+        let mut all_pubkeys = vec![];
+        for validator in &self.validators {
+            all_pubkeys.push(validator.pubkey.clone());
+        }
+
+        let mut committee_indices = vec![];
+        for pubkey in &self.current_sync_committee.pubkeys {
+            let index = all_pubkeys
+                .iter()
+                .position(|r| r == pubkey)
+                .ok_or_else(|| anyhow!("Pubkey not found in all_pubkeys."))?;
+            committee_indices.push(index);
+        }
+
+        for (participant_index, participation_bit) in committee_indices
+            .iter()
+            .zip(sync_aggregate.sync_committee_bits.iter())
+        {
+            if participation_bit {
+                self.increase_balance(*participant_index as u64, participant_reward);
+                self.increase_balance(self.get_beacon_proposer_index()?, proposer_reward);
+            } else {
+                self.decrease_balance(*participant_index as u64, participant_reward);
+            }
+        }
 
         Ok(())
     }
@@ -1154,4 +1224,34 @@ pub fn get_validator_from_deposit(
         exit_epoch: FAR_FUTURE_EPOCH,
         withdrawable_epoch: FAR_FUTURE_EPOCH,
     }
+}
+
+/// Wrapper to ``bls.FastAggregateVerify`` accepting the ``G2_POINT_AT_INFINITY`` signature when
+/// ``pubkeys`` is empty.
+pub fn eth_fast_aggregate_verify(
+    pubkeys: &[PubKey],
+    message: B256,
+    signature: BlsSignature,
+) -> Result<bool, anyhow::Error> {
+    if pubkeys.is_empty() && signature == G2_POINT_AT_INFINITY {
+        return Ok(true);
+    }
+
+    let public_keys: Vec<blst::min_pk::PublicKey> = pubkeys
+        .iter()
+        .map(|key| {
+            blst::min_pk::PublicKey::from_bytes(&key.inner)
+                .map_err(|err| anyhow!("Could not parse public key: {err:?}"))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let sig = blst::min_pk::Signature::from_bytes(&signature.signature)
+        .map_err(|err| anyhow!("Could not parse signature: {err:?}"))?;
+
+    let message = message.as_ref();
+
+    Ok(
+        sig.fast_aggregate_verify(true, message, DST, &public_keys.iter().collect::<Vec<_>>())
+            == blst::BLST_ERROR::BLST_SUCCESS,
+    )
 }
