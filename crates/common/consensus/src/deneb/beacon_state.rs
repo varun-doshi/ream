@@ -48,10 +48,11 @@ use crate::{
         MIN_ATTESTATION_INCLUSION_DELAY, MIN_EPOCHS_TO_INACTIVITY_PENALTY,
         MIN_GENESIS_ACTIVE_VALIDATOR_COUNT, MIN_GENESIS_TIME, MIN_PER_EPOCH_CHURN_LIMIT,
         MIN_SEED_LOOKAHEAD, MIN_SLASHING_PENALTY_QUOTIENT, MIN_VALIDATOR_WITHDRAWABILITY_DELAY,
-        PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SECONDS_PER_SLOT, SHARD_COMMITTEE_PERIOD,
-        SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, SYNC_COMMITTEE_SIZE, SYNC_REWARD_WEIGHT,
-        TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX,
-        TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT,
+        PROPORTINAL_SLASHING_MULTIPLIER_BELLATRIX, PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT,
+        SECONDS_PER_SLOT, SHARD_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT,
+        SYNC_COMMITTEE_SIZE, SYNC_REWARD_WEIGHT, TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX,
+        TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,
+        WHISTLEBLOWER_REWARD_QUOTIENT,
     },
     helpers::{is_active_validator, xor},
     historical_summary::HistoricalSummary,
@@ -1336,6 +1337,32 @@ impl BeaconState {
                 hash(&body.randao_reveal.signature).as_slice(),
             );
             self.randao_mixes[(epoch % EPOCHS_PER_HISTORICAL_VECTOR) as usize] = mix;
+        }
+
+        Ok(())
+    }
+
+    pub fn process_slashings(&mut self) -> anyhow::Result<()> {
+        let epoch = self.get_current_epoch();
+        let total_balance = self.get_total_active_balance();
+        let slashings_sum: u64 = self.slashings.iter().copied().sum();
+        let adjusted_total_active_balance = min(
+            slashings_sum + PROPORTINAL_SLASHING_MULTIPLIER_BELLATRIX,
+            total_balance,
+        );
+        // Factored out from total balance to avoid uint64 overflow
+        let increment = EFFECTIVE_BALANCE_INCREMENT;
+        let penalty_per_effective_balance_increment =
+            adjusted_total_active_balance / (total_balance / increment);
+        for (index, validator) in self.validators.clone().iter().enumerate() {
+            if validator.slashed
+                && (epoch + EPOCHS_PER_SLASHINGS_VECTOR) / 2 == validator.withdrawable_epoch
+            {
+                let effective_balance_increments = validator.effective_balance / increment;
+                let penalty =
+                    penalty_per_effective_balance_increment * effective_balance_increments;
+                self.decrease_balance(index as u64, penalty);
+            }
         }
 
         Ok(())
