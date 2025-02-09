@@ -20,8 +20,8 @@ use tree_hash::TreeHash;
 use tree_hash_derive::TreeHash;
 
 use super::{
-    beacon_block::BeaconBlock, execution_payload::ExecutionPayload,
-    execution_payload_header::ExecutionPayloadHeader,
+    beacon_block::BeaconBlock, beacon_block_body::BeaconBlockBody,
+    execution_payload::ExecutionPayload, execution_payload_header::ExecutionPayloadHeader,
 };
 use crate::{
     attestation::Attestation,
@@ -37,7 +37,7 @@ use crate::{
     fork_choice::helpers::constants::{
         BASE_REWARD_FACTOR, BLS_WITHDRAWAL_PREFIX, CAPELLA_FORK_VERSION, CHURN_LIMIT_QUOTIENT,
         DEPOSIT_CONTRACT_TREE_DEPTH, DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER,
-        DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_DEPOSIT, DOMAIN_SYNC_COMMITTEE,
+        DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_DEPOSIT, DOMAIN_RANDAO, DOMAIN_SYNC_COMMITTEE,
         DOMAIN_VOLUNTARY_EXIT, EFFECTIVE_BALANCE_INCREMENT, EPOCHS_PER_ETH1_VOTING_PERIOD,
         EPOCHS_PER_HISTORICAL_VECTOR, EPOCHS_PER_SLASHINGS_VECTOR, ETH1_ADDRESS_WITHDRAWAL_PREFIX,
         FAR_FUTURE_EPOCH, G2_POINT_AT_INFINITY, GENESIS_EPOCH, GENESIS_SLOT,
@@ -53,7 +53,7 @@ use crate::{
         TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX,
         TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT,
     },
-    helpers::is_active_validator,
+    helpers::{is_active_validator, xor},
     historical_summary::HistoricalSummary,
     indexed_attestation::IndexedAttestation,
     misc::{
@@ -1125,7 +1125,7 @@ impl BeaconState {
             .zip(sync_aggregate.sync_committee_bits.iter())
         {
             if bit {
-                participant_pubkeys.push(pubkey.clone());
+                participant_pubkeys.push(pubkey);
             }
         }
 
@@ -1140,7 +1140,7 @@ impl BeaconState {
         let is_valid = eth_fast_aggregate_verify(
             &participant_pubkeys,
             signing_root,
-            sync_aggregate.sync_committee_signature,
+            &sync_aggregate.sync_committee_signature,
         )?;
 
         ensure!(is_valid, "Sync aggregate signature verification failed.");
@@ -1215,7 +1215,7 @@ impl BeaconState {
         total_active_balance: u64,
         previous_epoch_target_balance: u64,
         current_epoch_target_balance: u64,
-    ) -> anyhow::Result<(), anyhow::Error> {
+    ) -> anyhow::Result<()> {
         let previous_epoch = self.get_previous_epoch();
         let current_epoch = self.get_current_epoch();
         let old_previous_justified_checkpoint = self.previous_justified_checkpoint;
@@ -1312,6 +1312,34 @@ impl BeaconState {
         }
         Ok(())
     }
+
+    pub fn process_randao(&mut self, body: BeaconBlockBody) -> anyhow::Result<()> {
+        let epoch = self.get_current_epoch();
+
+        // Verify RANDAO reveal
+        if let Some(proposer) = self
+            .validators
+            .get(self.get_beacon_proposer_index()? as usize)
+        {
+            let signing_root =
+                compute_signing_root(epoch, self.get_domain(DOMAIN_RANDAO, Some(epoch))?);
+
+            ensure!(eth_fast_aggregate_verify(
+                &[&proposer.pubkey],
+                signing_root,
+                &body.randao_reveal
+            )?);
+
+            // Mix in RANDAO reveal
+            let mix = xor(
+                self.get_randao_mix(epoch).as_slice(),
+                hash(&body.randao_reveal.signature).as_slice(),
+            );
+            self.randao_mixes[(epoch % EPOCHS_PER_HISTORICAL_VECTOR) as usize] = mix;
+        }
+
+        Ok(())
+    }
 }
 
 /// Check if ``leaf`` at ``index`` verifies against the Merkle ``root`` and ``branch``.
@@ -1359,11 +1387,11 @@ pub fn get_validator_from_deposit(
 /// Wrapper to ``bls.FastAggregateVerify`` accepting the ``G2_POINT_AT_INFINITY`` signature when
 /// ``pubkeys`` is empty.
 pub fn eth_fast_aggregate_verify(
-    pubkeys: &[PubKey],
+    pubkeys: &[&PubKey],
     message: B256,
-    signature: BlsSignature,
-) -> Result<bool, anyhow::Error> {
-    if pubkeys.is_empty() && signature == G2_POINT_AT_INFINITY {
+    signature: &BlsSignature,
+) -> anyhow::Result<bool> {
+    if pubkeys.is_empty() && *signature == G2_POINT_AT_INFINITY {
         return Ok(true);
     }
 

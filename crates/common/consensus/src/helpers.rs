@@ -98,3 +98,11 @@ pub fn get_voting_source(store: &Store, block_root: B256) -> Checkpoint {
         head_state.current_justified_checkpoint
     }
 }
+
+pub fn xor<T: AsRef<[u8]>>(bytes_1: T, bytes_2: T) -> B256 {
+    let mut result: B256 = B256::default();
+    for i in 0..32 {
+        result[i] = bytes_1.as_ref()[i] ^ bytes_2.as_ref()[i];
+    }
+    result
+}
