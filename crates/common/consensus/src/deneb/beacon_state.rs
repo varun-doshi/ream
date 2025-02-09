@@ -54,6 +54,7 @@ use crate::{
         TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT,
     },
     helpers::{is_active_validator, xor},
+    historical_batch::HistoricalBatch,
     historical_summary::HistoricalSummary,
     indexed_attestation::IndexedAttestation,
     misc::{
@@ -1336,6 +1337,35 @@ impl BeaconState {
                 hash(&body.randao_reveal.signature).as_slice(),
             );
             self.randao_mixes[(epoch % EPOCHS_PER_HISTORICAL_VECTOR) as usize] = mix;
+        }
+
+        Ok(())
+    }
+
+    pub fn process_historical_roots_update(&mut self) -> anyhow::Result<()> {
+        // set historical root accumulator
+        let next_epoch = self.get_current_epoch() + 1;
+        if next_epoch % (SLOTS_PER_HISTORICAL_ROOT / SLOTS_PER_EPOCH) == 0 {
+            let historical_batch = HistoricalBatch {
+                block_roots: self.block_roots.clone(),
+                state_roots: self.state_roots.clone(),
+            };
+            let _ = self
+                .historical_roots
+                .push(historical_batch.tree_hash_root());
+        }
+        Ok(())
+    }
+
+    pub fn process_rando_mixes_reset(&mut self) -> anyhow::Result<()> {
+        let current_epoch = self.get_current_epoch();
+        let next_epoch = current_epoch + 1;
+        let current_randao_mix = self.get_randao_mix(current_epoch);
+        let index = (next_epoch % EPOCHS_PER_HISTORICAL_VECTOR) as usize;
+
+        // set randao mix
+        if let Some(randao_mix) = self.randao_mixes.get_mut(index) {
+            *randao_mix = current_randao_mix;
         }
 
         Ok(())
