@@ -11,8 +11,8 @@ impl ServerConfig {
     /// Creates a new instance from CLI arguments
     pub fn from_args(http_port: usize, http_address: String, http_allow_origin: bool) -> Self {
         Self {
-            http_port: http_port,
-            http_address: http_address,
+            http_port,
+            http_address,
             http_allow_origin,
         }
     }
