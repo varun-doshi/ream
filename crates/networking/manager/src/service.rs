@@ -18,7 +18,7 @@ use ream_executor::ReamExecutor;
 use ream_network_spec::networks::network_spec;
 use ream_operation_pool::OperationPool;
 use ream_p2p::{
-    channel::{P2PMessage, P2PResponse},
+    channel::{GossipMessage, P2PMessage, P2PResponse},
     config::NetworkConfig,
     gossipsub::{
         configurations::GossipsubConfig,
@@ -39,6 +39,7 @@ use ream_p2p::{
 };
 use ream_storage::{db::ReamDB, tables::Table};
 use ream_syncer::block_range::BlockRangeSyncer;
+use ssz::Encode;
 use tokio::{sync::mpsc, time::interval};
 use tracing::{error, info, trace, warn};
 use tree_hash::TreeHash;
@@ -211,8 +212,24 @@ impl ManagerService {
                                             signed_block.message.block_root()
                                         );
 
+                                        let signed_block_ssz=signed_block.as_ssz_bytes();
                                         if let Err(err) =  beacon_chain.process_block(*signed_block).await {
                                             error!("Failed to process gossipsub beacon block: {err}");
+                                        }
+
+                                        let topic=GossipTopic{
+                                            fork: network_spec().fork_digest(genesis_validators_root()),
+                                            kind: GossipTopicKind::BeaconBlock,
+                                        };
+
+                                        topic.validate_gossip_message(&signed_block_ssz,&ream_db).unwrap();
+
+                                        if let Err(err)=p2p_sender.send_gossip(GossipMessage{
+                                            topic: topic,
+                                            data: signed_block_ssz,
+                                        }){
+                                            error!("Failed to send gossipsub beacon block: {err}");
+
                                         }
                                     }
                                     GossipsubMessage::BeaconAttestation(attestation) => {
@@ -497,9 +514,17 @@ impl ManagerService {
     }
 }
 
+#[derive(Debug, Clone)]
 struct P2PSender(pub mpsc::UnboundedSender<P2PMessage>);
 
 impl P2PSender {
+    pub fn send_gossip(&self, message: GossipMessage) -> anyhow::Result<()> {
+        if let Err(err) = self.0.send(P2PMessage::Gossip(message)) {
+            return Err(anyhow!("Failed to send gossip message: {err}"));
+        }
+        Ok(())
+    }
+
     pub fn send_response(
         &self,
         peer_id: PeerId,

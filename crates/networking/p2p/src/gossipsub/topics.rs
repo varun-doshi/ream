@@ -3,8 +3,10 @@ use alloy_primitives::{
     hex::{FromHex, ToHexExt},
 };
 use libp2p::gossipsub::{IdentTopic as Topic, TopicHash};
+use ream_storage::db::ReamDB;
+use tree_hash::TreeHash;
 
-use super::error::GossipsubError;
+use super::{error::GossipsubError, validation::validate_beacon_block};
 
 pub const TOPIC_PREFIX: &str = "eth2";
 pub const ENCODING_POSTFIX: &str = "ssz_snappy";
@@ -83,6 +85,30 @@ impl GossipTopic {
         };
 
         Ok(GossipTopic { fork, kind })
+    }
+
+    pub fn validate_gossip_message(
+        &self,
+        ssz_object: &Vec<u8>,
+        beacon_chain:&ReamDB
+    ) -> Result<(), GossipsubError> {
+
+        match self.kind{
+            GossipTopicKind::BeaconBlock => validate_beacon_block(ssz_object,beacon_chain),
+            GossipTopicKind::AggregateAndProof => todo!(),
+            GossipTopicKind::VoluntaryExit => todo!(),
+            GossipTopicKind::ProposerSlashing => todo!(),
+            GossipTopicKind::AttesterSlashing => todo!(),
+            GossipTopicKind::BeaconAttestation(_) => todo!(),
+            GossipTopicKind::SyncCommittee(_) => todo!(),
+            GossipTopicKind::SyncCommitteeContributionAndProof => todo!(),
+            GossipTopicKind::BlsToExecutionChange => todo!(),
+            GossipTopicKind::LightClientFinalityUpdate => todo!(),
+            GossipTopicKind::LightClientOptimisticUpdate => todo!(),
+            GossipTopicKind::BlobSidecar(_) => todo!(),
+        };
+
+        Ok(())
     }
 }
 

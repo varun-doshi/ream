@@ -328,6 +328,9 @@ impl Network {
                         P2PMessage::Response(P2PResponse {peer_id, connection_id, stream_id, message}) => {
                             self.swarm.behaviour_mut().req_resp.send_response(peer_id, connection_id, stream_id, message)
                         },
+                        P2PMessage::Gossip(message) => {
+                            !todo!()
+                        }
                     }
                 }
                 Some(Ok(peer_id)) = self.peers_to_ping.next() => {
